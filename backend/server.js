@@ -9,12 +9,14 @@ const PORT = process.env.PORT || 1256;
 
 /**
  * CORS FIX
- * Do not use "https://*.netlify.app" directly.
- * CORS does not support wildcard like that when credentials:true is used.
+ * Add your deployed frontend URL here.
+ * Backend:  https://autowebbuilder.onrender.com
+ * Frontend: https://autowebbuilder-1.onrender.com
  */
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
+  "https://autowebbuilder-1.onrender.com",
 ];
 
 app.use(
@@ -27,8 +29,13 @@ app.use(
         return callback(null, true);
       }
 
-      // Allow all Netlify frontend URLs
+      // Allow Netlify frontend URLs
       if (/^https:\/\/[a-zA-Z0-9-]+\.netlify\.app$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      // Allow Render frontend URLs
+      if (/^https:\/\/[a-zA-Z0-9-]+\.onrender\.com$/.test(origin)) {
         return callback(null, true);
       }
 
@@ -39,6 +46,8 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+app.options("*", cors());
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -79,7 +88,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Import routes safely
+// Import routes
 const authRoutes = require("./routes/authRoutes");
 const generateRoutes = require("./routes/generateRoutes");
 const deployRoutes = require("./routes/deployRoutes");
