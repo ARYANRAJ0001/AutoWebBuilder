@@ -5,9 +5,6 @@ const path = require("path");
 const os = require("os");
 const { execSync } = require("child_process");
 
-/**
- * Clean project/service/site name
- */
 function cleanName(name) {
   return (
     String(name || "fullstack-app")
@@ -28,17 +25,19 @@ function writeFileSafe(filePath, content) {
   fs.writeFileSync(filePath, content || "", "utf8");
 }
 
-/**
- * Make sure frontend package.json has correct Vite scripts/dependencies
- */
-function normalizeFrontendPackageJson(pkg, projectName) {
-  let parsed;
-
+function parsePackageJson(pkg) {
   try {
-    parsed = typeof pkg === "string" ? JSON.parse(pkg) : pkg;
+    if (!pkg) return {};
+    if (typeof pkg === "string") return JSON.parse(pkg);
+    if (typeof pkg === "object") return pkg;
+    return {};
   } catch {
-    parsed = {};
+    return {};
   }
+}
+
+function normalizeFrontendPackageJson(pkg, projectName) {
+  const parsed = parsePackageJson(pkg);
 
   parsed.name = cleanName(parsed.name || projectName || "generated-frontend");
   parsed.version = parsed.version || "1.0.0";
@@ -68,9 +67,49 @@ function normalizeFrontendPackageJson(pkg, projectName) {
   return JSON.stringify(parsed, null, 2);
 }
 
-/**
- * Collect frontend files from generated code
- */
+function injectApiUrlConstant(appJsx, backendUrl) {
+  const apiLine = `const API_URL = import.meta.env.VITE_API_URL || "${backendUrl}";\n`;
+
+  if (/const\s+API_URL\s*=/.test(appJsx)) {
+    return appJsx.replace(
+      /const\s+API_URL\s*=\s*[^;]+;/,
+      `const API_URL = import.meta.env.VITE_API_URL || "${backendUrl}";`
+    );
+  }
+
+  const importRegex = /^(import[\s\S]*?;\s*)+/;
+
+  if (importRegex.test(appJsx)) {
+    return appJsx.replace(importRegex, (imports) => `${imports}\n${apiLine}`);
+  }
+
+  return `${apiLine}\n${appJsx}`;
+}
+
+function patchLocalhostUrls(appJsx) {
+  return String(appJsx || "").replace(
+    /(["'`])http:\/\/(?:localhost|127\.0\.0\.1):\d+(\/[^"'`]*)?\1/g,
+    (match, quote, routePath) => {
+      if (routePath) {
+        return "`" + "${API_URL}" + routePath + "`";
+      }
+
+      return "API_URL";
+    }
+  );
+}
+
+function fixAxiosBaseURL(appJsx) {
+  let code = String(appJsx || "");
+
+  code = code.replace(
+    /axios\.defaults\.baseURL\s*=\s*["'`][^"'`]+["'`]\s*;/g,
+    "axios.defaults.baseURL = API_URL;"
+  );
+
+  return code;
+}
+
 function getFrontendFiles(code, projectName, backendUrl) {
   const f = code.frontend || {};
 
@@ -122,11 +161,11 @@ ReactDOM.createRoot(document.getElementById("root")).render(
   let appJsx =
     f.appJsx ||
     f["src/App.jsx"] ||
+    f.App ||
+    f["App.jsx"] ||
     `import { useEffect, useState } from "react";
 import axios from "axios";
 import "./App.css";
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
 function App() {
   const [message, setMessage] = useState("Loading backend...");
@@ -154,29 +193,14 @@ function App() {
 
 export default App;`;
 
-  /**
-   * Patch common wrong generated URLs.
-   * This prevents deployed frontend from calling localhost.
-   */
-  appJsx = appJsx
-    .replace(/http:\/\/localhost:5000/g, "${API_URL}")
-    .replace(/http:\/\/localhost:3000/g, "${API_URL}")
-    .replace(/http:\/\/localhost:8000/g, "${API_URL}")
-    .replace(/http:\/\/127\.0\.0\.1:5000/g, "${API_URL}");
-
-  /**
-   * If AI-generated App.jsx does not have API_URL, inject it.
-   */
-  if (!appJsx.includes("import.meta.env.VITE_API_URL")) {
-    appJsx =
-      `const API_URL = import.meta.env.VITE_API_URL || "${
-        backendUrl || "http://localhost:5000"
-      }";\n` + appJsx;
-  }
+  appJsx = injectApiUrlConstant(appJsx, backendUrl);
+  appJsx = patchLocalhostUrls(appJsx);
+  appJsx = fixAxiosBaseURL(appJsx);
 
   const appCss =
     f.appCss ||
     f["src/App.css"] ||
+    f.css ||
     `* {
   box-sizing: border-box;
 }
@@ -210,9 +234,6 @@ h1 {
   };
 }
 
-/**
- * Zip a directory
- */
 function zipDirectory(sourceDir) {
   return new Promise((resolve, reject) => {
     const archive = archiver("zip", { zlib: { level: 9 } });
@@ -227,13 +248,6 @@ function zipDirectory(sourceDir) {
   });
 }
 
-/**
- * Deploy FRONTEND to Netlify
- * Important:
- * - Backend URL must already exist.
- * - Vite env must be available BEFORE npm run build.
- * - We deploy dist folder, not raw src files.
- */
 async function deployFrontendToNetlify(projectName, code, backendUrl) {
   const netlifyToken = process.env.NETLIFY_TOKEN;
 
@@ -268,14 +282,19 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
     writeFileSafe(path.join(tempRoot, "src", "App.jsx"), files.appJsx);
     writeFileSafe(path.join(tempRoot, "src", "App.css"), files.appCss);
 
-    // Vite reads this during build time.
     writeFileSafe(
       path.join(tempRoot, ".env.production"),
       `VITE_API_URL=${backendUrl}\n`
     );
 
+    console.log("========== FRONTEND TEMP FILES ==========");
+    console.log("Temp root:", tempRoot);
+    console.log("App.jsx length:", files.appJsx.length);
+    console.log("Backend URL:", backendUrl);
+    console.log("========================================");
+
     console.log("📦 Installing frontend dependencies...");
-    execSync("npm install", {
+    execSync("npm install --include=dev", {
       cwd: tempRoot,
       stdio: "inherit",
     });
@@ -287,6 +306,7 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
       env: {
         ...process.env,
         VITE_API_URL: backendUrl,
+        CI: "false",
       },
     });
 
@@ -298,6 +318,10 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
 
     const zipBuffer = await zipDirectory(distDir);
 
+    if (!zipBuffer || zipBuffer.length === 0) {
+      throw new Error("Frontend ZIP is empty");
+    }
+
     const siteName = `${safeName}-frontend-${Date.now()}`;
 
     console.log("🌐 Creating Netlify site:", siteName);
@@ -306,7 +330,11 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
       name: siteName,
     });
 
-    const siteId = createRes.data.id;
+    const siteId = createRes.data?.id;
+
+    if (!siteId) {
+      throw new Error("Netlify site created but site ID missing");
+    }
 
     console.log("📤 Uploading built frontend dist ZIP to Netlify...");
 
@@ -323,11 +351,11 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
     );
 
     const liveUrl =
-      deployRes.data.ssl_url ||
-      deployRes.data.deploy_ssl_url ||
-      deployRes.data.url ||
-      createRes.data.ssl_url ||
-      createRes.data.url;
+      deployRes.data?.ssl_url ||
+      deployRes.data?.deploy_ssl_url ||
+      deployRes.data?.url ||
+      createRes.data?.ssl_url ||
+      createRes.data?.url;
 
     if (!liveUrl) {
       throw new Error("Netlify deployed but live URL not found");
@@ -338,7 +366,10 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
     return {
       success: true,
       liveUrl,
+      netlifyUrl: liveUrl,
+      deployUrl: liveUrl,
       siteId,
+      siteName,
       raw: deployRes.data,
     };
   } catch (error) {
@@ -347,9 +378,12 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
     return {
       success: false,
       liveUrl: null,
+      netlifyUrl: null,
+      deployUrl: null,
       siteId: null,
       message:
         error.response?.data?.message ||
+        error.response?.data?.error ||
         error.message ||
         "Frontend deploy failed",
       raw: error.response?.data || null,
@@ -361,13 +395,6 @@ async function deployFrontendToNetlify(projectName, code, backendUrl) {
   }
 }
 
-/**
- * Deploy BACKEND to Render
- * Important:
- * - GitHub repo must already contain /backend folder.
- * - Render rootDir must be "backend".
- * - Render API now requires envSpecificDetails for Node services.
- */
 async function deployBackendToRender(githubRepoUrl, projectName) {
   const renderApiKey = process.env.RENDER_API_KEY;
   const renderOwnerId = process.env.RENDER_OWNER_ID;
@@ -406,18 +433,15 @@ async function deployBackendToRender(githubRepoUrl, projectName) {
     branch: "main",
     autoDeploy: "yes",
     rootDir: "backend",
-
     serviceDetails: {
       env: "node",
       plan: "free",
       region: "oregon",
-
       envSpecificDetails: {
         buildCommand: "npm install",
         startCommand: "npm start",
       },
     },
-
     envVars: [
       {
         key: "NODE_ENV",
