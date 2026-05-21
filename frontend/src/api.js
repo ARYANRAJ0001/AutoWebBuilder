@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const API = axios.create({
-  baseURL: "http://localhost:1256/api",
+  baseURL: "https://autowebbuilder.onrender.com/api",
 });
 
 API.interceptors.request.use((config) => {
