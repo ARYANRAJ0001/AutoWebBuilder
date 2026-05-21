@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import "./App.css";
 
-const API_URL = "http://localhost:1256";
+const API_URL = "https://autowebbuilder.onrender.com";
 
 function App() {
   const [page, setPage] = useState("builder");
